@@ -2,156 +2,143 @@ rm(list=ls())
 
 library(ggplot2)
 library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(readr)
 library(Kendall)
 library(RColorBrewer)
 
 ### Load and pepare data ###
+if(Sys.info()[6]!="abramfleishman"){
+  setwd("/Users/owenryerson/Google Drive/Birds!/R data Processing/CSV/LaCruz")
 
-setwd("/Users/owenryerson/Google Drive/Birds!/R data Processing/CSV/LaCruz")
+  getwd()
 
-getwd()
+  files<-dir()
+  files
 
-files<-dir()
-files
+  sb <- read.csv(files[18], stringsAsFactors = FALSE)  ##"LaCruz_ShoreBirds.csv"
+}else{
+  sb<-read_csv("Data/LaCruz_ShoreBirds.csv")
+}
 
-sb <- read.csv(files[18], stringsAsFactors = FALSE)  ##"LaCruz_ShoreBirds.csv"
 
-## clean the data
+# Explore the data a little -------------------------------------------------
 
-sb$DateTime <- as.POSIXct(sb$DateTime, format = "%m/%d/%y")
 
-sb <- filter(sb, season != "09-10")  ## fall 11 is already gone
+sb <- sb %>%
+  filter( season != "09-10") %>%  ## fall 11 is already gone
+  mutate(DateTime=mdy(DateTime), # Make DateTime a date
+         # add a day of season
+         day_of_season = as.numeric(DateTime-ymd(paste(year(DateTime),"10","01",sep = "-"))),
+         day_of_season = ifelse(day_of_season <0,day_of_season +365,day_of_season ))
 
 sum(sb$Count, na.rm = TRUE)
 
-### make graph of speceis trend
 
-sznsp <- group_by(sb, Species, season) %>%
-  summarise(sum(Count, na.rm = TRUE))
 
-sznsp <- rename(sznsp, count = 'sum(Count, na.rm = TRUE)')
+# Mean birds per season ---------------------------------------------------
 
-ggplot(data = sznsp, aes(x=season, y= count)) + facet_wrap(sznsp$Species ~.,scales="free_y") + 
+mean_by_season <- sb %>%
+  # drop jul, aug, sep, # months 5 and 6 have few birds so doesn't make sense to include
+  filter(month(DateTime)%in%c(1:4,10:12)) %>%
+  # group by species season and date, this way we can get a total number of each
+  # species seen grouping all the sites.
+  group_by( Species, season, Date) %>%
+  summarise(total_count=sum(Count,na.rm=T)) %>%
+  # then take the average per survey each season
+  group_by( Species, season) %>%
+  summarise(mean_count=mean(total_count,na.rm=T))
+
+
+ggplot(data = mean_by_season , aes(x=season, y= mean_count)) +
+  facet_wrap(Species ~.,scales="free_y") +
   geom_point() +
-  labs(title="Laguna La Cruz Waterbird Counts 2010-2018",  x= "Season", y="Count") +
+  labs(title="Laguna La Cruz Waterbird Counts 2010-2018",  x= "Season", y="Mean Count") +
   theme_classic() +
-  geom_smooth(method="lm", se=FALSE) 
+  geom_smooth(method="lm", se=FALSE)
 
+ggplot(data = mean_by_season %>%
+         group_by(season) %>%
+         summarise(mean_count = sum(mean_count,na.rm=T)),
+       aes(x=season, y= mean_count)) +
+  geom_point() +
+  labs(title="Laguna La Cruz Waterbird Counts 2010-2018",  x= "Season", y="Mean Count") +
+  theme_classic() +
+  geom_smooth(method="lm", se=FALSE)
+
+
+# Total birds per survey --------------------------------------------------
+
+
+total_by_date <- sb %>%
+  filter(month(DateTime)%in%c(1:5,10:12)) %>%
+  group_by( Species, season, day_of_season) %>%
+  summarise(total_count=sum(Count,na.rm=T))
+
+
+ggplot(data = total_by_date ,
+       aes(x=day_of_season, y= total_count,col=season)) +
+  facet_wrap(~Species,scales="free_y")+
+  geom_point() +
+  labs(title="Laguna La Cruz Waterbird Counts 2010-2018",  x= "Season", y="Total Count") +
+  theme_classic() +
+  geom_smooth(se=FALSE)
+
+ggplot(data = total_by_date %>%
+         group_by(season,day_of_season) %>%
+         summarise(total_count = mean(total_count,na.rm=T)),
+       aes(x=day_of_season, y= total_count,col=season)) +
+  # facet_wrap(~Species,scales="free_y")+
+  geom_point() +
+  labs(title="Laguna La Cruz Waterbird Counts by Date 2010-2018",  x= "Day of Season (Since 01-Oct))", y="Mean Count") +
+  theme_classic() +
+  geom_smooth(se=F) +
+  scale_color_viridis_d()
+
+
+
+# Prep data for MannKendall -----------------------------------------------
 
 ### create data frame with monthly averages, including NA
+full <- data.frame(Date = seq(from = ymd("2010-10-01"), ymd("2018-06-01"),by='1 month'))
 
-start = as.Date("2010-10-01")
-full <- seq(start, by='1 month', length=93)
-View(full)
-
-
-######## The following section of code attempts to run the seasonal mann-kendall on monthly averages of the shore
-#### bird data inculding months with mising data. This did NOT work
 
 ### monthly averages
 sbmavg <- sb
-sbmavg$month <-  months(sbmavg$DateTime)
 
-sbmavg1 <- group_by(sbmavg, yearmonth) %>%
-  summarise(sum(Count, na.rm = TRUE))
+sbavg <- sbmavg %>%
+  # add a month column
+  mutate(month =  month(sbmavg$DateTime)) %>%
+  # group by date
+  group_by( yearmonth) %>%
+  # get total and the number of days surveyed
+  summarise(count = sum(Count, na.rm = TRUE),
+            dayspermonth = n_distinct(DateTime,na.rm=TRUE)) %>%
+  # manually calculate mean
+  mutate(avg=count/dayspermonth,
+         yearmonth = as.Date(paste(yearmonth,"-01",sep=""))) %>%
+  select(yearmonth, avg) %>%
+  # join with the full range of dates
+  right_join(full,by=c("yearmonth"="Date")) %>%
+  # get rig of jul-sep and surveys before sep-2012
+  filter(!month(yearmonth)%in%c(7,8,9),
+         yearmonth>"2012-09-01")
 
-sbmavg1 <- rename(sbmavg1, count = 'sum(Count, na.rm = TRUE)')
-
-daypermonth <- group_by(sbmavg, yearmonth) %>%
-  summarise(count= n_distinct(DateTime, na.rm = TRUE))
-
-daypermonth <- rename(daypermonth, days = count)
-
-sbmavg1 <- left_join(sbmavg1, daypermonth)
-
-sbmavg1$avg <- sbmavg1$count / sbmavg1$days
-
-sbmavg1$yearmonth <- as.Date(paste(sbmavg1$yearmonth,"-01",sep=""))  ### adds day to year month
-
-sbavg <- select(sbmavg1, yearmonth, avg)
-
-sbma <- data.frame(Date=full, Value=with(sbavg, avg[match(full, yearmonth)]))    
-sbma$Value <- as.numeric(sbma$Value)
-sbma$Value <- as.vector(sbma$Value)
-
-ts <- ts(sbma$Value, start=c(2010, 10),  frequency=12)
+# create time series
+ts <- ts(sbavg$avg, start=c(2012, 10),  frequency=9) # changed frequancy to reflect the 3 months i removed
 ts
 
+# run  SeasonalMannKendall
 sm <- SeasonalMannKendall(ts)
 summary(sm)
 
+ggplot(sbavg,aes(x=yearmonth,y=avg))+
+  geom_point()+
+  geom_smooth(method="lm",se=F)+
+  facet_wrap(~month(yearmonth))
 
-
-
-
-
-
-sbmanona <- filter(sbma, Value != "NA")
-
-sbval <- as.vector(sbmanona$Value)
-
-l <- SeasonalMannKendall(sbval)  ## normal mk for monthly averages with na
-summary(l)
-
-
-?SeasonalMannKendall
-
-summary(ts)
-
-
-
-sb15 <- sb[!table(sb$Species)[sb$Species] < 15,] ### removes speceis with less than 15 occorances
-
-birds<-unique(sb15$Species)
-num_birds<-length(birds)
-
-bird <- as.data.frame(birds)
-write.csv(bird, file = 'lacruz_sb_sp.csv')
-
-
-### Loop to make a df for all sp.
-
-for (i in 1:length(birds)) {
-  assign(paste("df",birds[i], sep="_"), data_frame(subset(sb, Species == birds[i])))
-}
-
-### Loop to do seasonal mann kendal on all species
-
-for (i in 1:length(birds)) {
-  newdataframe<-(subset(sb15, Species == birds[i]))
-  ts <- ts(newdataframe$Count)
-  mann <- SeasonalMannKendall(ts)
-  summary(mann)
-}
-
-## regular mann-kendall
-
-for (i in 1:length(birds)) {
-  newdataframe<-(subset(sb15, Species == birds[i]))
-  mann <- MannKendall(newdataframe$Count)
-  summary(mann)
-}
-
-
-## maybe use a glm ????
-
-summary(m1 <- glm(Count ~ season, family="poisson", data=sb))
-
-
-
-### create data frame with all dates, including NA
-
-start = as.Date("2009-10-20")
-full <- seq(start, by='1 month', length= 58)
-
-sb <- select(shorebirds, DateTime, count)
-sb$DateTime <- as.Date(sb$DateTime)
-
-sbmonth <- data.frame(Date=full, Value=with(sb, count[match(full, DateTime)]))    
-sbday$Value <- as.numeric(sbday$Value)
-sbday$Value <- as.vector(sbday$Value)
-
-
-
+lm(avg~year(yearmonth)+month(yearmonth),data=sbavg) %>% summary
 
 
